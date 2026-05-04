@@ -1,0 +1,5 @@
+# Hardware: Intel i7-4790 @ 3.60GHz, 32GB RAM, 2× NVIDIA Quadro K620 (2GB VRAM each)
+# OS: Windows 10 Enterprise Version 20H2 (Build 19042.2965)
+# NVIDIA Driver: 552.22
+# CUDA Runtime: 11.2 (for TensorFlow 2.10.0)
+# cuDNN: 8
