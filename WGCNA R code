@@ -1,0 +1,524 @@
+ ############################# Loading appropriate libraries ############################# 
+library(WGCNA)
+library(DESeq2) 
+library(GEOquery)
+library(tidyverse)
+library(CorLevelPlot) 
+library(grid)
+library(gridExtra) 
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(RColorBrewer)
+
+
+ ############################# Data organisation and soft power calculation  ############################# 
+
+data_raw <- read.table("~/Desktop/feature_name_raw.txt", header = TRUE)
+# Create a function to add dup suffix
+rename_duplicates <- function(df) {
+  # Create a counter for each Feature
+  df <- df %>%
+    group_by(Feature) %>%
+    mutate(
+      dup_count = sequence(n()),
+      Feature = case_when(
+        n() == 1 ~ Feature,  # If no duplicates, keep original name
+        dup_count == 1 ~ Feature,  # First instance keeps original name
+        dup_count == 2 ~ paste0(Feature, "_dup"),  # First duplicate
+        TRUE ~ paste0(Feature, "_dup_", dup_count - 1)  # Additional duplicates
+      )
+    ) %>%
+    ungroup() %>%
+    select(-dup_count)  # Remove the counter column
+  
+  return(df)
+}
+
+data_raw <- rename_duplicates(data_raw)
+
+data_raw <- as.data.frame(data_raw)
+rownames(data_raw) <- data_raw$Feature 
+data_raw$Feature <- NULL
+
+gsg <- goodSamplesGenes(t(data_raw))
+
+gsg$allOK
+
+table(gsg$goodGenes)
+
+table(gsg$goodSamples)
+
+
+data_raw <- data_raw[gsg$goodGenes == TRUE,]
+
+# Assuming your sample names are the column names of data_raw
+sample_names <- colnames(data_raw)
+
+# Create a data frame to store phenotype information
+phenotype_data <- data.frame(
+    sample_name = sample_names,
+    # Extract age group (old/young)
+    age = gsub("^(old|young).*", "\\1", sample_names),
+    # Extract pool number
+     pool = gsub(".*_[Pp](\\d+)_.*", "\\1", sample_names),
+    # Extract mouse number
+    mouse = gsub(".*_M(\\d+)_.*", "\\1", sample_names),     
+	# Extract oocyte number
+   oocyte = gsub(".*_(\\d+)$", "\\1", sample_names)
+ )
+ 
+# Convert pool, mouse, and oocyte to numeric
+phenotype_data$pool <- as.numeric(phenotype_data$pool)
+phenotype_data$mouse <- as.numeric(phenotype_data$mouse)
+phenotype_data$oocyte <- as.numeric(phenotype_data$oocyte)
+
+# Set row names to match sample names
+rownames(phenotype_data) <- phenotype_data$sample_name
+
+# View the first few rows to verify
+head(phenotype_data)
+ 
+ 
+# Optional: add any additional calculated fields
+phenotype_data$age_factor <- factor(phenotype_data$age, levels = c("young", "old"))
+phenotype_data$pool_factor <- factor(paste0("Pool_", phenotype_data$pool))
+
+# Check the structure
+str(phenotype_data)
+
+View(phenotype_data)
+View(phenotype_data)
+
+##SAME NUMBER AND ORDER
+all(rownames(phenotype_data) %in% colnames(data_raw))
+
+all(rownames(phenotype_data) == colnames(data_raw))
+
+
+ dds <- DESeqDataSetFromMatrix(countData = data_raw, colData = phenotype_data, design = ~ 1)
+dds75 <- dds[rowSums(counts(dds) >= 15) >= 24,]
+nrow(dds75)
+dds_norm <- vst(dds75)
+
+norm.counts <- assay(dds_norm) %>% t()
+power <- c(c(1:10), seq(from = 12, to = 20, by = 2))
+
+sft <- pickSoftThreshold(norm.counts,                      
+					    powerVector = power,
+                         networkType = "signed",
+                         verbose = 5)
+sft_data <- sft$fitIndices
+
+ a1 <- ggplot(sft_data, aes(Power, SFT.R.sq, label = Power)) +
+     geom_point() +
+     geom_text(nudge_y = 0.1) +
+     geom_hline(yintercept = 0.8, colour = 'red') +
+     labs(x = 'Power', y = 'Scale free topology model fit, sign R^2') +
+    theme_light()
+
+a2 <- ggplot(sft_data, aes(Power, mean.k., label = Power)) +
+   geom_point() +
+  geom_text(nudge_y = 0.1) +
+   labs(x = 'Power', y = 'Mean Conectivity') +
+   theme_light()
+
+grid.arrange(a1, a2, nrow = 2)
+
+
+ ############################# Generating Gene Modules  ############################# 
+norm.counts <- sapply(norm.counts, as.numeric)
+soft_power <- 8 
+temp_cor <-cor
+cor <- WGCNA::cor
+bwnet <-blockwiseModules(norm.counts,
+                  maxBlockSize = 14000,
+                  TOMType = "signed",
+                  power = soft_power,
+                 mergeCutHeight = 0.25,
+                 numericLabels = FALSE,
+                  randomSeed = 1234, 
+                  verbose = 3)
+
+cor <- temp_cor
+plotDendroAndColors(bwnet$dendrograms[[1]], cbind(bwnet$unmergedColors, bwnet$colors),
+                     c("unmerged", "merged"),
+                     dendroLabels = FALSE,
+                     addGuide = TRUE, 
+                     hang = 0.03,
+                     guideHang = 0.05) 
+Identifying clusters significantly associated with phenotype (age) 
+age <- phenotype_data %>%
+mutate(age_factor = ifelse(grepl('old', age), 1, 0)) %>%
+select(6)
+View(age)
+module_eigengenes <- bwnet$Mes
+module_gene_mapping <- as.data.frame(bwnet$colors)
+nSamples <- nrow(norm.counts)
+nGenes <- ncol(norm.counts)
+module_trait_corr <- cor(module_eigengenes, age, use = 'p')
+module_trait_corr_pvals <- corPvalueStudent(module_trait_corr, nSamples)
+View(module_trait_corr_pvals)
+Heatmap for module relationship with age (Figure 4.4. A)
+# Create significance label matrix
+sig_labels <- matrix("", nrow = nrow(module_trait_corr), ncol = ncol(module_trait_corr))
+sig_labels[module_trait_corr_pvals < 0.001] <- "***"
+sig_labels[module_trait_corr_pvals >= 0.001 & module_trait_corr_pvals < 0.01] <- "**"
+sig_labels[module_trait_corr_pvals >= 0.01 & module_trait_corr_pvals < 0.05] <- "*"
+
+# Combine correlation value and significance into label
+combined_labels <- matrix(
+  paste0(round(module_trait_corr, 2), sig_labels),
+  nrow = nrow(module_trait_corr)
+)
+
+# Melt for ggplot
+melted_corr <- melt(module_trait_corr)
+colnames(melted_corr) <- c("Module", "Trait", "Correlation")
+melted_corr$Label <- as.vector(combined_labels)
+
+# Clean up module names
+melted_corr$Module <- gsub("ME", "", melted_corr$Module)
+
+# Keep module order as in original (or reorder by correlation if preferred)
+module_order <- rev(gsub("ME", "", rownames(module_trait_corr)))
+melted_corr$Module <- factor(melted_corr$Module, levels = module_order)
+
+ggplot(melted_corr, aes(x = Trait, y = Module, fill = Correlation)) +
+  geom_tile(color = "lightgrey", linewidth = 0.5) +
+  geom_text(aes(label = Label), size = 4.5) +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0, limits = c(-1, 1),
+    name = NULL
+  ) +
+  labs(title = "Module-Trait Relationships with Age") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 13),
+    axis.text.y = element_text(size = 13),
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    legend.position = "right"
+  )
+
+
+
+ ############################# Heatmap for module clustering  ############################# 
+# Define significant modules
+sig_modules <- c("MEpink", "MEsalmon", "MEbrown", "MEblue", "MEtan", "MEgreenyellow")
+display_names <- gsub("ME", "", sig_modules)
+
+# Extract significant module eigengenes
+sig_eigengenes <- module_eigengenes[, sig_modules]
+colnames(sig_eigengenes) <- display_names
+
+# Calculate adjacency matrix
+adjacency <- stats::cor(sig_eigengenes, use = "pairwise.complete.obs")
+adjacency <- abs(adjacency)
+
+# Cluster to get dendrogram order
+hc <- hclust(as.dist(1 - adjacency))
+ordered_names <- hc$labels[hc$order]
+
+# Melt the matrix 
+melted <- melt(adjacency)
+colnames(melted) <- c("Var1", "Var2", "value")
+
+# Apply dendrogram order as factors
+melted$Var1 <- factor(melted$Var1, levels = ordered_names)
+melted$Var2 <- factor(melted$Var2, levels = ordered_names)
+
+# filter to lower triangle by comparing factor levels
+melted <- melted[as.integer(melted$Var1) >= as.integer(melted$Var2), ]
+
+# Color palette
+my_colors <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+
+ggplot(melted, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.2f", value)),
+            color = "white", size = 5, fontface = "bold") +
+  scale_fill_gradientn(colors = my_colors, limits = c(0, 1),
+                       name = "Adjacency") +
+  scale_x_discrete(limits = ordered_names, position = "bottom") +
+  scale_y_discrete(limits = rev(ordered_names)) +
+  labs(title = "Module Eigengene Network") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 13),
+    axis.text.y = element_text(size = 13),
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    legend.position = "right"
+  ) +
+  coord_fixed()
+
+
+
+ ############################# Hub gene identification and module data export ############################# 
+# Extract genes per module
+pink <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'pink') %>%
+    rownames()
+tan <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'tan') %>%
+    rownames()
+brown <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'brown') %>%
+    rownames()
+salmon <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'salmon') %>%
+    rownames()
+greenyellow <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'greenyellow') %>%
+    rownames()
+blue <- module_gene_mapping %>% 
+    filter(bwnet$colors == 'blue') %>%
+    rownames()
+
+# Define module colors
+module_colors <- c("pink", "salmon", "brown", "blue", "tan", "greenyellow")
+
+# Create empty list to store each module's data frame
+module_list <- list()
+
+# Create a data frame for each module
+for(color in module_colors) {
+    values <- get(color)
+    module_df <- data.frame(
+        gene = values,
+        module = color
+    )
+    module_list[[color]] <- module_df
+}
+
+# Module membership measures
+module_membership_measure <- cor(module_eigengenes, norm.counts, use = 'p')
+module_membership_measures_pvals <- corPvalueStudent(module_membership_measure, nSamples)
+
+# Gene significance
+gene_significance_corr <- cor(norm.counts, age, use = 'p')
+gene_significance_corr_pvals <- corPvalueStudent(gene_significance_corr, nSamples)
+
+# Arrange by gene significance for age
+signif_for_age <- gene_significance_corr_pvals %>% 
+    as.data.frame() %>% 
+    arrange(age_factor)
+# Function to create module data with multiple hub thresholds
+create_module_table <- function(module_name, module_genes, module_color) {
+  # Fix gene significance data handling
+  gs_vector <- as.vector(gene_significance_corr)
+  names(gs_vector) <- rownames(gene_significance_corr)
+  
+  gs_pvalue_vector <- as.vector(gene_significance_corr_pvals)
+  names(gs_pvalue_vector) <- rownames(gene_significance_corr_pvals)
+  
+  # Create data frame for module genes
+  module_data <- data.frame(
+    gene = module_genes,
+    module = module_name,
+    moduleColor = module_color,
+    MM = abs(as.numeric(module_membership_measure[paste0("ME", module_name), module_genes])),
+    MM_pvalue = as.numeric(module_membership_measures_pvals[paste0("ME", module_name), module_genes]),
+    GS = abs(as.numeric(gs_vector[module_genes])),
+    GS_pvalue = as.numeric(gs_pvalue_vector[module_genes])
+  )
+  
+  # Add hub gene classifications with proper TRUE/FALSE values
+  module_data$hub_strict <- with(module_data, MM > 0.8 & GS > 0.4)
+  module_data$hub_medium <- with(module_data, MM > 0.8 & GS > 0.35)
+  module_data$hub_relaxed <- with(module_data, MM > 0.8 & GS > 0.3)
+  
+  # Add combined score and sort
+  module_data$combinedScore <- module_data$MM * module_data$GS
+  module_data <- module_data[order(-module_data$combinedScore), ]
+  
+  return(module_data)
+}
+
+# Create tables for each module
+modules <- list(
+  list(name = "blue", genes = blue, color = "blue"),
+  list(name = "salmon", genes = salmon, color = "salmon"),
+  list(name = "brown", genes = brown, color = "brown"),
+  list(name = "tan", genes = tan, color = "tan"),
+  list(name = "greenyellow", genes = greenyellow, color = "greenyellow"),
+  list(name = "pink", genes = pink, color = "pink")
+)
+
+# Generate and save tables
+for(mod in modules) {
+  # Create table
+  table <- create_module_table(mod$name, mod$genes, mod$color)
+  
+  # Save to CSV
+  filename <- paste0(mod$name, "_module_genes.csv")
+  write.csv(table, filename, row.names = FALSE)
+
+
+
+ ############################# Plots showing module genes with hub gene thresholds ############################# 
+
+#define pleasing colour palette
+module_colors_custom <- c(
+  "blue"        = "#4A90D9",
+  "salmon"      = "#E8735A",
+  "brown"       = "#A0522D",
+  "tan"         = "#C8A96E",
+  "greenyellow" = "#7DB954",
+  "pink"        = "#D96BA0"
+)
+
+# Build full gene data once outside the function (all probes)
+all_gene_data <- data.frame(
+  gene = colnames(norm.counts),
+  GS   = abs(as.numeric(gene_significance_corr))
+)
+
+create_module_plot <- function(module_name, module_genes, module_color) {
+  
+  # Add MM for this module for ALL genes
+  plot_data <- all_gene_data
+  plot_data$MM <- abs(as.numeric(module_membership_measure[paste0("ME", module_name), ]))
+  plot_data$inModule <- plot_data$gene %in% module_genes
+  plot_data$isHub    <- plot_data$inModule & plot_data$MM > 0.8 & plot_data$GS > 0.4
+  
+  n_hub   <- sum(plot_data$isHub)
+  n_total <- sum(plot_data$inModule)
+  
+  p <- ggplot(plot_data, aes(x = MM, y = GS)) +
+    geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray60") +
+    geom_hline(yintercept = 0.4, linetype = "dashed", color = "gray60") +
+    # Background: all non-module genes
+    geom_point(data = plot_data[!plot_data$inModule, ],
+               color = "grey80", alpha = 0.4, size = 1) +
+    # Module genes (non-hub)
+    geom_point(data = plot_data[plot_data$inModule & !plot_data$isHub, ],
+               color = module_color, alpha = 0.6, size = 1.8) +
+    # Hub genes
+    geom_point(data = plot_data[plot_data$isHub, ],
+               color = "red", alpha = 0.9, size = 1.8) +
+    annotate("text", x = Inf, y = Inf,
+             label = paste0("Hub genes: ", n_hub, "/", n_total),
+             hjust = 1.1, vjust = 1.5, size = 3.5, color = "gray30") +
+    labs(
+      title = paste0(module_name, " module"),
+      x = "Module membership",
+      y = "Gene significance"
+    ) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    scale_y_continuous(limits = c(0, 0.8), breaks = seq(0, 0.8, 0.2)) +
+    theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      axis.title = element_text(size = 9),
+      axis.text = element_text(size = 8),
+      panel.grid.minor = element_blank()
+    )
+  
+  return(p)
+}
+
+module_info_ordered <- list(
+  list(name = "blue",        genes = blue,        color = module_colors_custom["blue"]),
+  list(name = "brown",       genes = brown,        color = module_colors_custom["brown"]),
+  list(name = "pink",        genes = pink,         color = module_colors_custom["pink"]),
+  list(name = "greenyellow", genes = greenyellow,  color = module_colors_custom["greenyellow"]),
+  list(name = "tan",         genes = tan,          color = module_colors_custom["tan"]),
+  list(name = "salmon",      genes = salmon,       color = module_colors_custom["salmon"])
+)
+
+plots <- lapply(module_info_ordered, function(mod) {
+  create_module_plot(mod$name, mod$genes, mod$color)
+})
+
+grid.arrange(
+  arrangeGrob(grobs = plots, ncol = 2),
+  top = textGrob("Hub Gene Analysis by Module (MM > 0.8, GS > 0.4)",
+                 gp = gpar(fontsize = 14, fontface = "bold"))
+)
+
+############################# Gene Ontology plots for module function ############################# 
+library(viridis)
+
+#note data was loaded in as list of values for each term – to use code for .csv file have data structure, term, fold enrichment, FDR, count, class 
+# read.csv(“filename”, header = true) 
+# term = go_data$term 
+# enrichment = go_data$enrichment 
+# etc etc
+
+go_data <- data.frame(
+    term = c(term list),
+    enrichment = c(enrichment value list),
+    FDR = c(FDR value list),
+    count = c(count value list),
+    class = c(class list)
+)
+
+go_data$enrichment_capped <- pmin(go_data$enrichment, 30)
+go_data$is_capped <- go_data$enrichment > 30
+
+# Panel A 
+blue_data <- go_data %>%
+    filter(class == "blue") %>%
+    arrange(desc(enrichment)) %>%
+    slice(1:20) %>%
+    mutate(term = factor(term, levels = rev(term)))
+
+p_blue <- ggplot(blue_data, aes(x = enrichment_capped, y = term, size = count, color = FDR)) +
+    geom_point() +
+    facet_grid("blue" ~ .) +                          # ← removed switch = "y"
+    scale_color_viridis(option = "magma", direction = -1,
+                        name = "FDR", limits = c(0, 0.05),
+                        breaks = c(0.01, 0.02, 0.03, 0.04)) +
+    scale_size_continuous(name = "Count", range = c(2, 8)) +
+    scale_x_continuous(limits = c(0, 30), breaks = seq(0, 30, 10)) +
+    labs(x = "Enrichment", y = NULL) +
+    theme_minimal(base_size = 11) +
+    theme(
+        axis.text.y  = element_text(size = 9),
+        axis.text.x  = element_text(size = 9),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "grey70", fill = NA, linewidth = 0.5),
+        strip.background = element_rect(fill = "grey85", color = "grey70", linewidth = 0.5),
+        strip.text.y = element_text(angle = 270, face = "bold", size = 10),  # ← changed
+        strip.placement = "outside",
+        legend.position = "none",
+        plot.margin = margin(5, 2, 5, 5)
+    )
+
+# Panel B: Other modules 
+p_other <- ggplot(other_data, aes(x = enrichment_capped, y = term, size = count, color = FDR)) +
+    geom_point() +
+    geom_text(aes(label = capped_label), hjust = -0.3, size = 3, color = "gray40", na.rm = TRUE) +
+    facet_grid(class ~ ., scales = "free_y", space = "free_y") +   # ← removed switch = "y"
+    scale_color_viridis(option = "magma", direction = -1,
+                        name = "FDR", limits = c(0, 0.05),
+                        breaks = c(0.01, 0.02, 0.03, 0.04)) +
+    scale_size_continuous(name = "Count", range = c(2, 8)) +
+    scale_x_continuous(limits = c(0, 35), breaks = seq(0, 30, 10)) +
+    labs(x = "Enrichment", y = NULL) +
+    theme_minimal(base_size = 11) +
+    theme(
+        axis.text.y  = element_text(size = 9),
+        axis.text.x  = element_text(size = 9),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "grey70", fill = NA, linewidth = 0.5),
+        strip.background = element_rect(fill = "grey85", color = "grey70", linewidth = 0.5),
+        strip.text.y = element_text(angle = 270, face = "bold", size = 10),  # ← .y not .y.left
+        strip.placement = "outside",
+        legend.position = "right",
+        plot.margin = margin(5, 5, 5, 2)
+    )
+
+# Combine 
+grid.arrange(
+    p_blue, p_other,
+    ncol = 2,
+    widths = c(1.2, 1),
+    top = textGrob("Gene Ontology Enrichment by Module",
+                   gp = gpar(fontsize = 14, fontface = "bold"))
+)
