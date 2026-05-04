@@ -1,0 +1,57 @@
+# Load required libraries
+library(gplots)
+library(RColorBrewer)
+library(readr)
+
+# Read the simplified data
+data <- read.csv("~/Desktop/degs log 4 heatmap.csv", header = TRUE)
+
+# Assuming the first column contains probe/gene names
+gene_names <- data[, 1]
+expression_data <- data[, 2:ncol(data)]
+rownames(expression_data) <- gene_names
+
+# Convert to matrix
+expression_matrix <- as.matrix(expression_data)
+
+# Create annotation for samples (for ordering)
+sample_age <- ifelse(grepl("old", colnames(expression_matrix)), "Old", "Young")
+
+# Order samples by age group
+age_order <- order(sample_age)
+ordered_matrix <- expression_matrix[, age_order]
+
+# Create color palette
+my_palette <- colorRampPalette(c("green", "black", "red"))(100)
+
+# Create the heatmap with heatmap.2
+pdf("gene_expression_heatmap.pdf", width = 10, height = 8)
+heatmap.2(ordered_matrix,
+          trace = "none",                 # No trace lines
+          density.info = "none",          # No density plot
+          scale = "row",                  # Z-score by row (gene)
+          labRow = FALSE,                 # No row labels (too many)
+          cexCol = 0.7,                   # Column text size
+          col = my_palette,               # Color scheme
+          margins = c(8, 2),              # Margins for labels
+          hclust = function(x) hclust(x, method = "complete"),
+          distfun = function(x) as.dist((1-cor(t(x)))/2),  # Correlation distance
+          ColSideColors = ifelse(grepl("old", colnames(ordered_matrix)), "darkred", "darkblue"),
+          main = "Gene Expression Heatmap (Samples Ordered by Age)"
+)
+dev.off()
+
+# To view the heatmap in R 
+heatmap.2(ordered_matrix,
+          trace = "none",
+          density.info = "none",
+          scale = "row",
+          labRow = FALSE,
+          cexCol = 0.7,
+          col = my_palette,
+          margins = c(8, 2),
+          hclust = function(x) hclust(x, method = "complete"),
+          distfun = function(x) as.dist((1-cor(t(x)))/2),
+          ColSideColors = ifelse(grepl("old", colnames(ordered_matrix)), "darkred", "darkblue"),
+          main = "Gene Expression Heatmap (Samples Ordered by Age)"
+)
